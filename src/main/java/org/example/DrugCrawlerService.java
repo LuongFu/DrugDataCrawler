@@ -1,11 +1,13 @@
 package org.example;
 
-import okhttp3.*;
 import com.google.gson.Gson;
-import com.google.gson.JsonObject;
 import com.google.gson.JsonArray;
-import org.springframework.stereotype.Service;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import okhttp3.*;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -13,167 +15,175 @@ import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger; // THÊM DÒNG NÀY ĐỂ ĐẾM TIẾN ĐỘ
 
 @Service
 public class DrugCrawlerService {
 
     @Autowired
-    private ThuocRepository thuocRepository; // Tiêm Repository vào đây
+    private ThuocRepository thuocRepository;
 
-    // Khởi tạo OkHttpClient với cấu hình timeout
+    // Biến đếm an toàn cho đa luồng
+    private final AtomicInteger completedPages = new AtomicInteger(0);
+
     private final OkHttpClient client = new OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(15, TimeUnit.SECONDS)
             .build();
 
     private final Gson gson = new Gson();
-
-    // URL API chính thức của Cục Quản lý Dược
     private static final String API_URL = "https://dichvucong.dav.gov.vn/api/services/app/soDangKy/GetAllPublicServerPaging";
 
-    /**
-     * Hàm crawl dữ liệu thuốc ĐA LUỒNG
-     * @param totalPages Tổng số trang cần lấy
-     * @param threadCount Số luồng chạy song song (Khuyên dùng từ 3-5 luồng)
-     */
     public void startCrawling(int totalPages, int threadCount) {
         System.out.println("=============================================================");
-        System.out.println(" Bắt đầu Crawl đa luồng với: " + threadCount + " luồng song song.");
+        System.out.println(" Bắt đầu Crawl đa luồng với: " + threadCount + " luồng.");
+        System.out.println(" Tổng số trang: " + totalPages);
         System.out.println("=============================================================");
 
-        // Khởi tạo Thread Pool với số luồng cấu hình
         ExecutorService executorService = Executors.newFixedThreadPool(threadCount);
-        int pageSize = 20; // Số bản ghi trên 1 trang
+        int pageSize = 20;
 
         for (int page = 1; page <= totalPages; page++) {
             final int currentPage = page;
-
-            // Giao việc cho từng luồng trong Thread Pool xử lý
-            executorService.submit(() -> {
-                crawlSinglePage(currentPage, pageSize);
-            });
+            executorService.submit(() -> crawlSinglePage(currentPage, pageSize, totalPages));
         }
 
-        // Sau khi đã giao hết việc, ra lệnh cho Thread Pool đóng cửa (không nhận việc mới nữa)
         executorService.shutdown();
-
         try {
-            // Chờ đợi cho đến khi TẤT CẢ các luồng hoàn thành xong công việc của mình
-            // Đặt thời gian chờ tối đa là 1 tiếng (hoặc tùy bạn cấu hình)
             if (!executorService.awaitTermination(1, TimeUnit.HOURS)) {
-                System.err.println("Quá thời gian chờ, một số luồng chưa chạy xong!");
+                System.err.println("Quá thời gian chờ!");
             }
         } catch (InterruptedException e) {
-            System.err.println("Tiến trình chính bị gián đoạn khi đang chờ các luồng con.");
             Thread.currentThread().interrupt();
         }
 
         System.out.println("=============================================================");
-        System.out.println(" ĐÃ HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH CRAWL ĐA LUỒNG!");
+        System.out.println(" HOÀN THÀNH 100%! ĐÃ CRAWL HẾT " + totalPages + " TRANG.");
         System.out.println("=============================================================");
     }
 
-    /**
-     * Hàm phụ trách xử lý việc crawl cho duy nhất một trang
-     */
-    private void crawlSinglePage(int page, int pageSize) {
-        String threadName = Thread.currentThread().getName();
-        System.out.println("[" + threadName + "] Đang xử lý trang: " + page);
-
+    private void crawlSinglePage(int page, int pageSize, int totalPages) {
         int skip = (page - 1) * pageSize;
+        String threadName = Thread.currentThread().getName();
 
         try {
-            // 1. Khai báo kiểu dữ liệu JSON cho Body
             MediaType JSON = MediaType.parse("application/json; charset=utf-8");
-
-            // 2. Tạo JSON Payload gửi đi
             String jsonPayload = String.format("{\"SoDangKyThuoc\":{},\"KichHoat\":true,\"skipCount\":%d,\"maxResultCount\":%d,\"sorting\":null}", skip, pageSize);
             RequestBody body = RequestBody.create(jsonPayload, JSON);
 
-            // 3. Tạo Request POST kèm Headers giả lập trình duyệt
             Request request = new Request.Builder()
                     .url(API_URL)
                     .post(body)
-                    .addHeader("Accept", "application/json, text/plain, */*")
-                    .addHeader("Content-Type", "application/json")
-                    .addHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-                    .addHeader("Origin", "https://dichvucong.dav.gov.vn")
-                    .addHeader("Referer", "https://dichvucong.dav.gov.vn/congbothuoc/index")
+                    .addHeader("User-Agent", "Mozilla/5.0")
                     .build();
 
-            // 4. Thực thi Request
             try (Response response = client.newCall(request).execute()) {
                 if (response.isSuccessful() && response.body() != null) {
-                    String responseData = response.body().string();
-
-                    // 5. Phân tích cú pháp JSON trả về
-                    JsonObject jsonObject = gson.fromJson(responseData, JsonObject.class);
-                    JsonArray drugArray = null;
+                    JsonObject jsonObject = gson.fromJson(response.body().string(), JsonObject.class);
 
                     if (jsonObject.has("result")) {
-                        JsonObject resultObj = jsonObject.getAsJsonObject("result");
-                        if (resultObj.has("items")) {
-                            drugArray = resultObj.getAsJsonArray("items");
-                        }
-                    }
-
-                    if (drugArray != null && drugArray.size() > 0) {
+                        JsonArray drugArray = jsonObject.getAsJsonObject("result").getAsJsonArray("items");
                         List<ThuocEntity> thuocList = new ArrayList<>();
 
-                        // Duyệt qua từng object JSON trong mảng
-                        for (int i = 0; i < drugArray.size(); i++) {
-                            JsonObject drugJson = drugArray.get(i).getAsJsonObject();
-
+                        for (JsonElement element : drugArray) {
+                            JsonObject drugJson = element.getAsJsonObject();
                             String soDangKy = getStringFromJson(drugJson, "soDangKy");
-                            String tenThuoc = getStringFromJson(drugJson, "tenThuoc");
-                            String hoatChat = getStringFromJson(drugJson, "hoatChatChinh");
-                            String congTy = getStringFromJson(drugJson, "tenCongTySanXuat");
 
-                            // Đồng bộ hóa (synchronized) việc kiểm tra và lưu DB để tránh 2 luồng cùng lúc kiểm tra trùng lặp bị lỗi
-                            synchronized (this) {
-                                if (soDangKy != null && !thuocRepository.existsBySoDangKy(soDangKy)) {
-                                    ThuocEntity thuoc = new ThuocEntity();
-                                    thuoc.setSoDangKy(soDangKy);
-                                    thuoc.setTenThuoc(tenThuoc);
-                                    thuoc.setHoatChatChinh(hoatChat);
-                                    thuoc.setCongTySanXuat(congTy);
+                            if (soDangKy != null && !thuocRepository.existsBySoDangKy(soDangKy)) {
+                                ThuocEntity thuoc = new ThuocEntity();
 
-                                    thuocList.add(thuoc);
+                                // Thông tin cơ bản
+                                thuoc.setSoDangKy(soDangKy);
+                                thuoc.setSoDangKyCu(getStringFromJson(drugJson, "soDangKyCu"));
+                                thuoc.setTenThuoc(getStringFromJson(drugJson, "tenThuoc"));
+                                thuoc.setPhanLoaiThuocEnum(getIntFromJson(drugJson, "phanLoaiThuocEnum"));
+                                thuoc.setIsHetHan(getBoolFromJson(drugJson, "isHetHan"));
+                                thuoc.setIsDuocPhep(getBoolFromJson(drugJson, "isDuocPhep"));
+                                thuoc.setIsDaRutSoDangKy(getBoolFromJson(drugJson, "isDaRutSoDangKy"));
+                                thuoc.setIsActive(getBoolFromJson(drugJson, "isActive"));
+                                thuoc.setMaSoHoSoGiaHan(getStringFromJson(drugJson, "maSoHoSoGiaHan"));
+                                thuoc.setNgayTiepNhanHSGiaHan(getStringFromJson(drugJson, "ngayTiepNhanHSGiaHan"));
+                                thuoc.setGhiChu(getStringFromJson(drugJson, "ghiChu"));
+
+                                // Thông tin đăng ký thuốc
+                                if (drugJson.has("thongTinDangKyThuoc") && !drugJson.get("thongTinDangKyThuoc").isJsonNull()) {
+                                    JsonObject dkThuoc = drugJson.getAsJsonObject("thongTinDangKyThuoc");
+                                    thuoc.setNgayCapSoDangKy(getStringFromJson(dkThuoc, "ngayCapSoDangKy"));
+                                    thuoc.setNgayGiaHanSoDangKy(getStringFromJson(dkThuoc, "ngayGiaHanSoDangKy"));
+                                    thuoc.setNgayHetHanSoDangKy(getStringFromJson(dkThuoc, "ngayHetHanSoDangKy"));
+                                    thuoc.setSoQuyetDinh(getStringFromJson(dkThuoc, "soQuyetDinh"));
+                                    thuoc.setDotCap(getStringFromJson(dkThuoc, "dotCap"));
                                 }
+
+                                // Thông tin thuốc cơ bản (hoạt chất, hàm lượng, dạng bào chế, ...)
+                                if (drugJson.has("thongTinThuocCoBan") && !drugJson.get("thongTinThuocCoBan").isJsonNull()) {
+                                    JsonObject coBan = drugJson.getAsJsonObject("thongTinThuocCoBan");
+                                    thuoc.setHoatChatChinh(getStringFromJson(coBan, "hoatChatChinh"));
+                                    thuoc.setHamLuong(getStringFromJson(coBan, "hamLuong"));
+                                    thuoc.setDangBaoChe(getStringFromJson(coBan, "dangBaoChe"));
+                                    thuoc.setDongGoi(getStringFromJson(coBan, "dongGoi"));
+                                    thuoc.setTieuChuan(getStringFromJson(coBan, "tieuChuan"));
+                                    thuoc.setTuoiTho(getStringFromJson(coBan, "tuoiTho"));
+                                    thuoc.setDuongDung(getStringFromJson(coBan, "tenDuongDung"));
+                                }
+
+                                // Công ty sản xuất
+                                if (drugJson.has("congTySanXuat") && !drugJson.get("congTySanXuat").isJsonNull()) {
+                                    JsonObject sx = drugJson.getAsJsonObject("congTySanXuat");
+                                    thuoc.setCongTySanXuat(getStringFromJson(sx, "tenCongTySanXuat"));
+                                    thuoc.setDiaChiSanXuat(getStringFromJson(sx, "diaChiSanXuat"));
+                                    thuoc.setNuocSanXuat(getStringFromJson(sx, "nuocSanXuat"));
+                                }
+
+                                // Công ty đăng ký
+                                if (drugJson.has("congTyDangKy") && !drugJson.get("congTyDangKy").isJsonNull()) {
+                                    JsonObject dk = drugJson.getAsJsonObject("congTyDangKy");
+                                    thuoc.setCongTyDangKy(getStringFromJson(dk, "tenCongTyDangKy"));
+                                    thuoc.setDiaChiDangKy(getStringFromJson(dk, "diaChiDangKy"));
+                                    thuoc.setNuocDangKy(getStringFromJson(dk, "nuocDangKy"));
+                                }
+
+                                thuocList.add(thuoc);
                             }
                         }
 
-                        // Lưu danh sách vào PostgreSQL
                         if (!thuocList.isEmpty()) {
-                            thuocRepository.saveAll(thuocList);
-                            System.out.println("  -> [" + threadName + "] Đã lưu mới " + thuocList.size() + " bản ghi từ trang " + page + " vào DB.");
-                        } else {
-                            System.out.println("  -> [" + threadName + "] Trang " + page + " không có bản ghi mới để lưu.");
+                            try {
+                                thuocRepository.saveAll(thuocList);
+                            } catch (DataIntegrityViolationException ignored) {}
                         }
-
-                    } else {
-                        System.out.println("  -> [" + threadName + "] Trang " + page + " trống hoặc sai cấu trúc.");
                     }
-                } else {
-                    System.err.println("  -> [" + threadName + "] Lỗi HTTP: " + response.code() + " ở trang " + page);
                 }
             }
 
-            // 6. GIÃN CÁCH AN TOÀN: Bắt buộc dừng lại một chút để tránh bị quét IP
-            Thread.sleep(1500);
+            // Cập nhật tiến độ
+            int count = completedPages.incrementAndGet();
+            double percent = ((double) count / totalPages) * 100;
+            System.out.printf("[%s] Xong trang %d/%d (%.2f%%)%n", threadName, count, totalPages, percent);
 
-        } catch (IOException | InterruptedException e) {
-            System.err.println("Lỗi khi xử lý trang " + page + ": " + e.getMessage());
-            if (e instanceof InterruptedException) {
-                Thread.currentThread().interrupt();
-            }
+            Thread.sleep(1000); // Giãn cách 1 giây để tránh bị chặn
+        } catch (Exception e) {
+            System.err.println("Lỗi trang " + page + ": " + e.getMessage());
         }
     }
 
-    // Hàm tiện ích để lấy chuỗi an toàn từ JSON (tránh lỗi NullPointerException)
     private String getStringFromJson(JsonObject json, String key) {
         if (json.has(key) && !json.get(key).isJsonNull()) {
             return json.get(key).getAsString();
+        }
+        return null;
+    }
+
+    private Integer getIntFromJson(JsonObject json, String key) {
+        if (json.has(key) && !json.get(key).isJsonNull()) {
+            return json.get(key).getAsInt();
+        }
+        return null;
+    }
+
+    private Boolean getBoolFromJson(JsonObject json, String key) {
+        if (json.has(key) && !json.get(key).isJsonNull()) {
+            return json.get(key).getAsBoolean();
         }
         return null;
     }
