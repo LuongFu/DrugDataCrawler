@@ -19,7 +19,7 @@ Tool cào thông tin thuốc (dữ liệu công khai) từ trang web của Cục
 
 1. **Clone repository:**
    ```bash
-   git clone <repo_url>
+   git clone https://github.com/drfamilyoi/drfamilyoi-medicine-crawler.git
    cd crawldrugdata
    ```
 
