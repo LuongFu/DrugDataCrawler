@@ -21,9 +21,10 @@ public class CrawlApplication implements CommandLineRunner {
         System.out.println("  ỨNG DỤNG SPRING BOOT ĐÃ KHỞI ĐỘNG      ");
         System.out.println("=========================================");
 
-        // SỐ 10: Số lượng trang cần crawl (Bạn có thể đổi thành 2000 hoặc bao nhiêu tùy ý)
+        // SỐ 10: Số lượng trang cần crawl (Bạn có thể đổi thành 2000 hoặc bao nhiêu tùy
+        // ý)
         // SỐ 4: Số luồng chạy song song (Khuyên dùng từ 3 - 5 luồng là an toàn)
-        drugCrawlerService.startCrawling(2734, 10);
+        drugCrawlerService.startCrawling(2734, 8);
 
         System.out.println("Đã chạy xong kịch bản trong CommandLineRunner.");
     }
